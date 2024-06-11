@@ -4,9 +4,13 @@ from rest_framework.decorators import APIView
 from rest_framework.response import Response
 from .models import CustomUser, Chat
 import jwt, datetime
+from .token import checkToken, generateAccessToken, generateRefreshToken
 
-fs = open('secret_key.txt', 'r')
-secret_key = fs.read()
+af = open("access_key.txt", "r")
+access_key = af.read()
+
+rf = open("refresh_key.txt", "r")
+refresh_key = rf.read()
 
 # Create your views here.
 class UserLogin(APIView):
@@ -18,7 +22,6 @@ class UserLogin(APIView):
 
         if not user:
             return  Response({'detail': 'An account is not exists!'}, status=status.HTTP_400_BAD_REQUEST)
-        
         if not user.check_password(request.data['password']):
             return Response({'detail':'Wrong Password.'}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -27,34 +30,21 @@ class UserLogin(APIView):
         if (check_online):
             return Response({'detail':'This account is being logged in elsewhere.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        access_payload = {
-            'user_id': user.id,
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=15),
-            'iat': datetime.datetime.utcnow()
-        }
-
-        access_token = jwt.encode(access_payload, secret_key, algorithm='HS256')
-
-        refresh_payload = {
-            'user_id': user.id,
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=1440),
-            'iat': datetime.datetime.utcnow()
-        }
-
-        rf_token = jwt.encode(refresh_payload, secret_key, algorithm='HS256')
+        access_token = generateAccessToken(user)
+        rf_token = generateRefreshToken(user)
 
         user.is_active = 1
         user.refresh_token = rf_token
         user.save()
 
         response = Response()
-        response.set_cookie(key='access_token', value=access_token, httponly=True)
-        response.set_cookie(key='refresh_token', value=rf_token, httponly=True)
+        response.set_cookie(key='refreshToken', value=rf_token, httponly=True, secure=False, path='/', samesite='strict')
 
         serializer = UserSerializer(instance=user)
 
         response.data = {
             'user': serializer.data,
+            'accessToken': access_token,
         }
 
         return response
@@ -81,45 +71,67 @@ class UserRegister(APIView):
 
 class UserLogout(APIView):
     def get(self, request):
+        res = checkToken(request)
+        if (res != 1):
+            return res    
         try:
-            token = request.COOKIES.get('access_token')
-            payload = jwt.decode(token, secret_key, algorithms=['HS256']) 
-            
-            try:
-                response = Response()
-                user = CustomUser.objects.filter(id=request.query_params['user_id']).first()
-                user.is_active = 0
-                user.refresh_token = ""
-                user.save()
+            response = Response()
 
-                response.delete_cookie('access_token')
-                response.delete_cookie('refresh_token')
+            user = CustomUser.objects.filter(id=request.query_params['user_id']).first()
+            user.is_active = 0
+            user.refresh_token = ""
+            user.save()
 
-                response.data = {
-                    'detail': 'success'
-                }
-                return response
-        
-            except Exception as e:
-                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        
-        except jwt.ExpiredSignatureError:
-            return Response({'detail':'Token has exprised!'}, status=status.HTTP_401_UNAUTHORIZED)
-        except jwt.InvalidTokenError:
-            return Response({'detail':'Token is not valid!'}, status=status.HTTP_401_UNAUTHORIZED)
+            response.delete_cookie('refreshToken')
 
+            response.data = {
+                'detail': 'success'
+            }
+            return response
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 class UserView(APIView):
     def get(self, request):
-        try:
-            token = request.COOKIES.get('access_token')
-            payload = jwt.decode(token, secret_key, algorithms=['HS256']) 
-            
-            # code
+        res = checkToken(request)
+        if (res != 1):
+            return res 
 
-            return Response({'detail': 'success'}, status=status.HTTP_200_OK)
-        
+        # code
+
+        return Response({'detail': 'success!'}, status=status.HTTP_200_OK)
+
+class RefreshToken(APIView):
+    def get(self, request):
+        if ('refreshToken' not in request.COOKIES):
+            return Response({'detail':'You\'re not authenticated!'}, status=status.HTTP_401_UNAUTHORIZED)
+        try:
+            refreshToken = request.COOKIES.get('refreshToken')
+
+            payload = jwt.decode(refreshToken, refresh_key, algorithms=['HS256']) 
+            user = CustomUser.objects.filter(id=payload['user_id']).first()
+
+            if (refreshToken != user.refresh_token):
+                return Response({'detail':'Token is not valid!'}, status=status.HTTP_401_UNAUTHORIZED)
+
+            newAccessToken = generateAccessToken(user)
+            newRefreshToken = generateRefreshToken(user)
+
+            user.refresh_token = newRefreshToken
+            user.save()
+
+            response = Response()
+            response.set_cookie(key='refreshToken', value=newRefreshToken, httponly=True, secure=False, path='/', samesite='strict')
+            response.data = {
+                'accessToken': newAccessToken
+            }
+
+            return response
+
+
         except jwt.ExpiredSignatureError:
             return Response({'detail':'Token has exprised!'}, status=status.HTTP_401_UNAUTHORIZED)
         except jwt.InvalidTokenError:
             return Response({'detail':'Token is not valid!'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        
